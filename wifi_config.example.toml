@@ -1,0 +1,20 @@
+# --------------------------------------------------------------------------
+# WiFi / weather configuration
+#
+#   1. Copy this file to `wifi_config.toml`  (which is gitignored)
+#   2. Replace the values below with your own network details
+#
+# `wifi_config.toml` is read at *build time* by `build.rs` and baked into the
+# firmware as environment variables, so your credentials never end up in the
+# source tree or in version control.
+#
+# For the Wokwi simulator the defaults below work out of the box: Wokwi exposes
+# an open access point called "Wokwi-GUEST" (empty password).
+# --------------------------------------------------------------------------
+
+ssid = "Wokwi-GUEST"
+password = ""
+
+# City used for the wttr.in weather lookup. Use a single word or a URL-encoded
+# value (e.g. "Bengaluru", "New+York").
+city = "Bengaluru"

@@ -12,7 +12,7 @@ path = "./src/bin/main.rs"
 esp-hal = { version = "~1.1.1", features = ["esp32c3", "log-04", "unstable"] }
 display-interface-i2c = "0.5.0"
 embedded-graphics = "0.8.2"
-ssd1306 = "0.10.0"
+ssd1306 = { version = "0.10.0", features = ["async"] }
 
 esp-rtos = { version = "0.3.0", features = [
   "embassy",
@@ -27,11 +27,13 @@ log                    = "0.4.32"
 
 embassy-net = { version = "0.9.1", features = [
   "dhcpv4",
+  "dns",
   "log",
   "medium-ethernet",
   "tcp",
   "udp",
 ] }
+embassy-sync = "0.8.0"
 embedded-io = "0.7.1"
 embedded-io-async = "0.7.0"
 esp-alloc = "0.10.0"

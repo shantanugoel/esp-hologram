@@ -2,6 +2,9 @@
 debug/
 target/
 
+# Local WiFi credentials (see wifi_config.example.toml)
+wifi_config.toml
+
 # Editor configuration
 .vscode/
 .zed/

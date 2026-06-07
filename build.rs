@@ -1,7 +1,49 @@
 fn main() {
     linker_be_nice();
+    emit_wifi_config();
     // make sure linkall.x is the last linker script (otherwise might cause problems with flip-link)
     println!("cargo:rustc-link-arg=-Tlinkall.x");
+}
+
+/// Reads WiFi/weather settings from `wifi_config.toml` (gitignored) and falls back to
+/// `wifi_config.example.toml` when it is missing, so the project always builds. The values are
+/// exposed to the firmware as compile-time environment variables, keeping credentials out of the
+/// source tree.
+fn emit_wifi_config() {
+    use std::path::Path;
+
+    println!("cargo:rerun-if-changed=wifi_config.toml");
+    println!("cargo:rerun-if-changed=wifi_config.example.toml");
+
+    let path = if Path::new("wifi_config.toml").exists() {
+        "wifi_config.toml"
+    } else {
+        "wifi_config.example.toml"
+    };
+    let content = std::fs::read_to_string(path).unwrap_or_default();
+
+    let mut ssid = String::new();
+    let mut password = String::new();
+    let mut city = String::from("Bengaluru");
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once('=') {
+            let value = value.trim().trim_matches('"').to_string();
+            match key.trim() {
+                "ssid" => ssid = value,
+                "password" => password = value,
+                "city" => city = value,
+                _ => {}
+            }
+        }
+    }
+
+    println!("cargo:rustc-env=WIFI_SSID={ssid}");
+    println!("cargo:rustc-env=WIFI_PASSWORD={password}");
+    println!("cargo:rustc-env=WEATHER_CITY={city}");
 }
 
 fn linker_be_nice() {
