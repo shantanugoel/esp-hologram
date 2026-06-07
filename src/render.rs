@@ -1,14 +1,13 @@
-//! The holographic scene: a 3D horizontal carousel clock, a procedural mascot, and weather
-//! particles, all composed onto the 128x64 monochrome buffer.
+//! The holographic scene: a legible floating clock, a procedural mascot, and weather particles,
+//! all composed onto the 128x64 monochrome buffer.
 //!
 //! Design constraints (ESP32-C3 has no FPU, I2C bandwidth is precious):
 //!
-//! * **No floats.** Carousel depth is driven by per-slot lookup tables and Q8 fixed-point
-//!   interpolation (`lerp`).
+//! * **No floats.** The 3D depth cues use fixed lookup tables and integer-only geometry.
 //! * **Vector digits.** Numbers are drawn as scalable 7-segment shapes rather than font bitmaps,
 //!   so they zoom smoothly and cost almost nothing in flash.
-//! * **Stepped/snapping motion.** The carousel is perfectly static except for a short 4-frame
-//!   "snap" when the minute changes, which keeps the I2C bus quiet.
+//! * **Stepped motion.** The time stays readable; only the ring phase and a small minute-change
+//!   pulse animate, which keeps the I2C bus quiet.
 //! * **Dithered depth.** Background time tokens are masked with a checkerboard so they read as
 //!   "further away" on a display that has no grey.
 
@@ -22,17 +21,6 @@ use embedded_graphics::{
 
 use crate::weather::{ParticleField, WeatherState};
 use crate::{TimeSync, Update};
-
-// ---- carousel geometry -----------------------------------------------------
-// One entry per slot s = -3..=3 (index s + 3). The arrays describe where a token sits and how big
-// it is when it occupies that slot. Spacing is compressed towards the edges to fake perspective.
-const SLOT_X: [i32; 7] = [4, 16, 36, 64, 92, 112, 124];
-const SLOT_Y: [i32; 7] = [20, 24, 34, 54, 34, 24, 20];
-/// Token scale in Q8 fixed point (256 == 1.0).
-const SLOT_S: [i32; 7] = [36, 64, 120, 256, 120, 64, 36];
-
-/// Fixed-point progress added per frame during a snap (256 / 4 == a 4-frame snap).
-const SNAP_STEP: i32 = 64;
 
 // Base (full-scale) digit metrics in pixels; everything else scales off these.
 const DW: i32 = 11; // digit width
@@ -48,6 +36,36 @@ const SOLID_SCALE: i32 = 210;
 
 const BLINK_PERIOD: u32 = 48;
 const BLINK_LEN: u32 = 3;
+const PULSE_LEN: u8 = 5;
+
+/// 24 points around a shallow ellipse, clockwise from the left edge. The ring is intentionally
+/// wider than the time so it reads as the horizontal "floor" reflection in the cube.
+const RING: [Point; 24] = [
+    Point::new(28, 35),
+    Point::new(31, 31),
+    Point::new(39, 27),
+    Point::new(50, 24),
+    Point::new(63, 22),
+    Point::new(77, 21),
+    Point::new(91, 22),
+    Point::new(104, 24),
+    Point::new(115, 27),
+    Point::new(123, 31),
+    Point::new(126, 35),
+    Point::new(123, 49),
+    Point::new(115, 54),
+    Point::new(104, 57),
+    Point::new(91, 59),
+    Point::new(77, 60),
+    Point::new(63, 59),
+    Point::new(50, 57),
+    Point::new(39, 54),
+    Point::new(31, 49),
+    Point::new(28, 35),
+    Point::new(31, 31),
+    Point::new(39, 27),
+    Point::new(50, 24),
+];
 
 /// Segment masks for digits 0-9. Bit 0..=6 map to segments a,b,c,d,e,f,g.
 const SEG: [u8; 10] = [
@@ -62,17 +80,6 @@ const SEG: [u8; 10] = [
     0b1111111, // 8
     0b1101111, // 9
 ];
-
-/// Linear interpolation in Q8: returns `a` at `t == 0` and `b` at `t == 256`.
-#[inline]
-fn lerp(a: i32, b: i32, t: i32) -> i32 {
-    a + (((b - a) * t) >> 8)
-}
-
-#[inline]
-fn slot_idx(s: i32) -> usize {
-    (s + 3).clamp(0, 6) as usize
-}
 
 /// Fill a rectangle, optionally through a checkerboard mask (the "depth" dither).
 fn fill<D>(target: &mut D, x: i32, y: i32, w: i32, h: i32, dither: bool)
@@ -154,6 +161,61 @@ where
     fill(target, dx, c.y + 2 * c.h / 3 - dot / 2, dot, dot, dither);
 }
 
+#[inline]
+fn ring_point(i: usize) -> Point {
+    RING[i % 20]
+}
+
+fn draw_ring_segment<D>(target: &mut D, i: usize, bright: bool)
+where
+    D: DrawTarget<Color = BinaryColor>,
+{
+    let stroke = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
+    let a = ring_point(i);
+    let b = ring_point(i + 1);
+    let _ = Line::new(a, b).into_styled(stroke).draw(target);
+
+    if bright {
+        let _ = Line::new(Point::new(a.x, a.y + 1), Point::new(b.x, b.y + 1))
+            .into_styled(stroke)
+            .draw(target);
+    }
+}
+
+fn draw_ring_runner<D>(target: &mut D, phase: usize, front: bool)
+where
+    D: DrawTarget<Color = BinaryColor>,
+{
+    for i in phase..phase + 3 {
+        let in_front = (10..20).contains(&(i % 20));
+        if in_front == front {
+            draw_ring_segment(target, i, front);
+        }
+    }
+}
+
+fn draw_ring_back<D>(target: &mut D, phase: usize)
+where
+    D: DrawTarget<Color = BinaryColor>,
+{
+    let stroke = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
+    let _ = Polyline::new(&RING[0..=10])
+        .into_styled(stroke)
+        .draw(target);
+    draw_ring_runner(target, phase, false);
+}
+
+fn draw_ring_front<D>(target: &mut D, phase: usize)
+where
+    D: DrawTarget<Color = BinaryColor>,
+{
+    let stroke = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
+    let _ = Polyline::new(&RING[10..=20])
+        .into_styled(stroke)
+        .draw(target);
+    draw_ring_runner(target, phase, true);
+}
+
 /// Draw a HH:MM token centred at `(cx, cy)` at the given Q8 `scale`.
 fn draw_token<D>(target: &mut D, cx: i32, cy: i32, scale: i32, hh: u8, mm: u8, colon_on: bool)
 where
@@ -198,13 +260,13 @@ where
     draw_digit(target, cell(x, dw), mm % 10, dither);
 }
 
-/// The carousel clock: tracks wall-clock time and the snap animation between minutes.
+/// The floating clock: tracks wall-clock time and drives the ring phase.
 pub struct Clock {
     anchor: Option<TimeSync>,
-    /// Minute-of-day currently shown in the centre slot.
-    base_min: i32,
-    /// Q8 snap progress, 0 when at rest.
-    snap: i32,
+    /// Minute-of-day currently shown by the foreground time.
+    current_min: i32,
+    /// Small frame countdown used to pulse the foreground time when the minute changes.
+    pulse: u8,
     colon_on: bool,
     blink: bool,
     frame: u32,
@@ -214,16 +276,15 @@ impl Clock {
     pub fn new() -> Self {
         Clock {
             anchor: None,
-            base_min: 0,
-            snap: 0,
+            current_min: 0,
+            pulse: 0,
             colon_on: true,
             blink: false,
             frame: 0,
         }
     }
 
-    /// Adopt a fresh wall-clock anchor from the network. The next [`tick`](Self::tick) snaps the
-    /// carousel straight to the real time (jumps of more than one minute are not animated).
+    /// Adopt a fresh wall-clock anchor from the network.
     pub fn sync(&mut self, ts: TimeSync) {
         self.anchor = Some(ts);
     }
@@ -243,48 +304,36 @@ impl Clock {
         }
     }
 
-    /// Advance one frame: update the colon blink, the eye blink, and the snap animation.
+    /// Advance one frame: update the colon blink, the eye blink, and the ring phase.
     pub fn tick(&mut self) {
         let secs = self.now_secs();
         let cur_min = ((secs / 60) % 1440) as i32;
         self.colon_on = secs.is_multiple_of(2);
 
-        if self.snap > 0 {
-            self.snap += SNAP_STEP;
-            if self.snap >= 256 {
-                self.snap = 0;
-                self.base_min = (self.base_min + 1).rem_euclid(1440);
-            }
-        } else {
-            let diff = (cur_min - self.base_min).rem_euclid(1440);
-            if diff == 1 {
-                self.snap = SNAP_STEP; // animate a one-minute advance
-            } else if diff != 0 {
-                self.base_min = cur_min; // large jump (first sync / wrap): snap instantly
-            }
+        if cur_min != self.current_min {
+            self.current_min = cur_min;
+            self.pulse = PULSE_LEN;
+        } else if self.pulse > 0 {
+            self.pulse -= 1;
         }
 
         self.frame = self.frame.wrapping_add(1);
         self.blink = self.frame % BLINK_PERIOD < BLINK_LEN;
     }
 
-    /// Draw the whole carousel of minute tokens.
+    /// Draw one readable foreground time with a rotating horizontal ring.
     pub fn draw<D>(&self, target: &mut D)
     where
         D: DrawTarget<Color = BinaryColor>,
     {
-        for s in -3..=3 {
-            let i = slot_idx(s);
-            let j = slot_idx(s - 1);
-            let cx = lerp(SLOT_X[i], SLOT_X[j], self.snap);
-            let cy = lerp(SLOT_Y[i], SLOT_Y[j], self.snap);
-            let scale = lerp(SLOT_S[i], SLOT_S[j], self.snap);
+        let phase = ((self.frame / 2) % 20) as usize;
+        let hh = (self.current_min / 60) as u8;
+        let mm = (self.current_min % 60) as u8;
+        let scale = if self.pulse > 0 { 268 } else { 256 };
 
-            let minute = (self.base_min + s).rem_euclid(1440);
-            let hh = (minute / 60) as u8;
-            let mm = (minute % 60) as u8;
-            draw_token(target, cx, cy, scale, hh, mm, self.colon_on);
-        }
+        draw_ring_back(target, phase);
+        draw_token(target, 80, 46, scale, hh, mm, self.colon_on);
+        draw_ring_front(target, phase);
     }
 }
 
@@ -294,8 +343,8 @@ impl Default for Clock {
     }
 }
 
-/// Draw the central 32x32 mascot. Its expression is the weather "sprite variant"; `blink` closes
-/// the eyes for the blink frame.
+/// Draw the bottom-left mascot. Its expression is the weather "sprite variant"; `blink` closes the
+/// eyes for the blink frame.
 fn draw_mascot<D>(target: &mut D, weather: WeatherState, blink: bool)
 where
     D: DrawTarget<Color = BinaryColor>,
@@ -303,41 +352,43 @@ where
     let on = BinaryColor::On;
     let stroke = PrimitiveStyle::with_stroke(on, 1);
     let fill_style = PrimitiveStyle::with_fill(on);
+    const X: i32 = 4;
+    const Y: i32 = 41;
 
     // Glowing outline head (hologram look: bright lines on true black).
     let _ = RoundedRectangle::with_equal_corners(
-        Rectangle::new(Point::new(50, 18), Size::new(28, 28)),
-        Size::new(7, 7),
+        Rectangle::new(Point::new(X, Y + 5), Size::new(22, 18)),
+        Size::new(5, 5),
     )
     .into_styled(stroke)
     .draw(target);
 
     // Antenna.
-    let _ = Line::new(Point::new(64, 18), Point::new(64, 13))
+    let _ = Line::new(Point::new(X + 11, Y + 5), Point::new(X + 11, Y + 1))
         .into_styled(stroke)
         .draw(target);
-    let _ = Circle::with_center(Point::new(64, 12), 3)
+    let _ = Circle::with_center(Point::new(X + 11, Y), 3)
         .into_styled(fill_style)
         .draw(target);
 
     // Eyes (open circles, or closed lines on the blink frame).
-    let eye_y = 30;
-    for eye_x in [59, 69] {
+    let eye_y = Y + 13;
+    for eye_x in [X + 7, X + 15] {
         if blink {
-            let _ = Line::new(Point::new(eye_x - 2, eye_y), Point::new(eye_x + 2, eye_y))
+            let _ = Line::new(Point::new(eye_x - 1, eye_y), Point::new(eye_x + 1, eye_y))
                 .into_styled(stroke)
                 .draw(target);
         } else {
-            let _ = Circle::with_center(Point::new(eye_x, eye_y), 4)
+            let _ = Circle::with_center(Point::new(eye_x, eye_y), 3)
                 .into_styled(fill_style)
                 .draw(target);
         }
     }
 
-    draw_mouth(target, weather);
+    draw_mouth(target, weather, X, Y);
 }
 
-fn draw_mouth<D>(target: &mut D, weather: WeatherState)
+fn draw_mouth<D>(target: &mut D, weather: WeatherState, x: i32, y: i32)
 where
     D: DrawTarget<Color = BinaryColor>,
 {
@@ -346,43 +397,42 @@ where
         WeatherState::Clear => {
             // Smile.
             let pts = [
-                Point::new(59, 38),
-                Point::new(62, 41),
-                Point::new(66, 41),
-                Point::new(69, 38),
+                Point::new(x + 7, y + 17),
+                Point::new(x + 10, y + 19),
+                Point::new(x + 12, y + 19),
+                Point::new(x + 15, y + 17),
             ];
             let _ = Polyline::new(&pts).into_styled(stroke).draw(target);
         }
         WeatherState::Clouds => {
-            let _ = Line::new(Point::new(60, 40), Point::new(68, 40))
+            let _ = Line::new(Point::new(x + 7, y + 18), Point::new(x + 15, y + 18))
                 .into_styled(stroke)
                 .draw(target);
         }
         WeatherState::Rain => {
             // Frown.
             let pts = [
-                Point::new(59, 41),
-                Point::new(62, 38),
-                Point::new(66, 38),
-                Point::new(69, 41),
+                Point::new(x + 7, y + 19),
+                Point::new(x + 10, y + 17),
+                Point::new(x + 12, y + 17),
+                Point::new(x + 15, y + 19),
             ];
             let _ = Polyline::new(&pts).into_styled(stroke).draw(target);
         }
         WeatherState::Thunderstorm => {
             // Surprised "o".
-            let _ = Circle::with_center(Point::new(64, 40), 4)
+            let _ = Circle::with_center(Point::new(x + 11, y + 18), 3)
                 .into_styled(stroke)
                 .draw(target);
         }
         WeatherState::Mist => {
             // Sleepy wavy mouth.
             let pts = [
-                Point::new(59, 40),
-                Point::new(61, 38),
-                Point::new(63, 40),
-                Point::new(65, 38),
-                Point::new(67, 40),
-                Point::new(69, 38),
+                Point::new(x + 7, y + 18),
+                Point::new(x + 9, y + 17),
+                Point::new(x + 11, y + 18),
+                Point::new(x + 13, y + 17),
+                Point::new(x + 15, y + 18),
             ];
             let _ = Polyline::new(&pts).into_styled(stroke).draw(target);
         }
