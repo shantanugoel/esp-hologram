@@ -1,5 +1,5 @@
-//! The holographic scene: a legible floating clock, a procedural mascot, and weather particles,
-//! all composed onto the 128x64 monochrome buffer.
+//! The holographic scene: a compact weather strip and a legible floating clock, composed onto the
+//! 128x64 monochrome buffer.
 //!
 //! Design constraints (ESP32-C3 has no FPU, I2C bandwidth is precious):
 //!
@@ -8,18 +8,20 @@
 //!   so they zoom smoothly and cost almost nothing in flash.
 //! * **Stepped motion.** The time stays readable; only the ring phase and a small minute-change
 //!   pulse animate, which keeps the I2C bus quiet.
-//! * **Dithered depth.** Background time tokens are masked with a checkerboard so they read as
-//!   "further away" on a display that has no grey.
+//! * **Dithered depth.** The close offset time pass is masked with a checkerboard so it reads as
+//!   a rear extrusion on a display that has no grey.
 
 use embassy_time::Instant;
 use embedded_graphics::{
     Pixel,
+    mono_font::{MonoTextStyle, ascii::FONT_6X10},
     pixelcolor::BinaryColor,
     prelude::*,
-    primitives::{Circle, Line, Polyline, PrimitiveStyle, Rectangle, RoundedRectangle},
+    primitives::{Circle, Line, Polyline, PrimitiveStyle, Rectangle},
+    text::{Baseline, Text},
 };
 
-use crate::weather::{ParticleField, WeatherState};
+use crate::weather::WeatherState;
 use crate::{TimeSync, Update};
 
 const DISPLAY_W: i32 = 128;
@@ -30,15 +32,13 @@ const DW: i32 = 11; // digit width
 const DH: i32 = 18; // digit height
 const CW: i32 = 6; // colon column width
 const G: i32 = 3; // gap between elements
-const TH: i32 = 2; // segment thickness
+const TH: i32 = 3; // segment thickness
 
 /// Below this scale a token is drawn as a dithered blob instead of legible digits.
 const BLOB_SCALE: i32 = 96;
 /// At or above this scale a token is drawn solid; in between it is dithered for depth.
 const SOLID_SCALE: i32 = 210;
 
-const BLINK_PERIOD: u32 = 48;
-const BLINK_LEN: u32 = 3;
 const PULSE_LEN: u8 = 5;
 
 /// 24 points around a shallow ellipse, clockwise from the left edge. The ring is intentionally
@@ -261,9 +261,129 @@ where
     draw_ring_runner(target, phase, true);
 }
 
+fn weather_label(weather: WeatherState) -> &'static str {
+    match weather {
+        WeatherState::Clear => "CLEAR",
+        WeatherState::Clouds => "CLOUD",
+        WeatherState::Rain => "RAIN",
+        WeatherState::Thunderstorm => "STORM",
+        WeatherState::Mist => "MIST",
+    }
+}
+
+fn draw_weather_icon<D>(target: &mut D, weather: WeatherState, x: i32, y: i32)
+where
+    D: DrawTarget<Color = BinaryColor>,
+{
+    let on = BinaryColor::On;
+    let stroke = PrimitiveStyle::with_stroke(on, 1);
+    let fill = PrimitiveStyle::with_fill(on);
+
+    match weather {
+        WeatherState::Clear => {
+            let center = Point::new(x + 7, y + 6);
+            let _ = Circle::with_center(center, 5)
+                .into_styled(stroke)
+                .draw(target);
+            for (dx, dy) in [(0, -7), (0, 7), (-7, 0), (7, 0)] {
+                let _ = Line::new(
+                    Point::new(center.x + dx * 4 / 7, center.y + dy * 4 / 7),
+                    Point::new(center.x + dx, center.y + dy),
+                )
+                .into_styled(stroke)
+                .draw(target);
+            }
+        }
+        WeatherState::Clouds => {
+            draw_cloud_icon(target, x, y, stroke);
+        }
+        WeatherState::Rain => {
+            draw_cloud_icon(target, x, y, stroke);
+            for dx in [3, 8, 13] {
+                let _ = Line::new(Point::new(x + dx, y + 11), Point::new(x + dx - 2, y + 14))
+                    .into_styled(stroke)
+                    .draw(target);
+            }
+        }
+        WeatherState::Thunderstorm => {
+            draw_cloud_icon(target, x, y, stroke);
+            let pts = [
+                Point::new(x + 8, y + 9),
+                Point::new(x + 5, y + 14),
+                Point::new(x + 10, y + 13),
+                Point::new(x + 7, y + 18),
+            ];
+            let _ = Polyline::new(&pts).into_styled(stroke).draw(target);
+        }
+        WeatherState::Mist => {
+            for yy in [3, 7, 11] {
+                let _ = Rectangle::new(Point::new(x, y + yy), Size::new(16, 1))
+                    .into_styled(fill)
+                    .draw(target);
+            }
+        }
+    }
+}
+
+fn draw_cloud_icon<D>(target: &mut D, x: i32, y: i32, stroke: PrimitiveStyle<BinaryColor>)
+where
+    D: DrawTarget<Color = BinaryColor>,
+{
+    let _ = Circle::with_center(Point::new(x + 5, y + 7), 5)
+        .into_styled(stroke)
+        .draw(target);
+    let _ = Circle::with_center(Point::new(x + 10, y + 5), 7)
+        .into_styled(stroke)
+        .draw(target);
+    let _ = Circle::with_center(Point::new(x + 15, y + 7), 5)
+        .into_styled(stroke)
+        .draw(target);
+    let _ = Line::new(Point::new(x + 1, y + 10), Point::new(x + 19, y + 10))
+        .into_styled(stroke)
+        .draw(target);
+}
+
+fn draw_weather_strip<D>(target: &mut D, weather: WeatherState)
+where
+    D: DrawTarget<Color = BinaryColor>,
+{
+    let on = BinaryColor::On;
+    let stroke = PrimitiveStyle::with_stroke(on, 1);
+    draw_weather_icon(target, weather, 4, 0);
+
+    let text = MonoTextStyle::new(&FONT_6X10, on);
+    let _ = Text::with_baseline(
+        weather_label(weather),
+        Point::new(30, 2),
+        text,
+        Baseline::Top,
+    )
+    .draw(target);
+
+    // Thin divider gives the clock a clean stage without boxing it in.
+    let _ = Line::new(Point::new(0, 14), Point::new(127, 14))
+        .into_styled(stroke)
+        .draw(target);
+}
+
 /// Draw a HH:MM token centred at `(cx, cy)` at the given Q8 `scale`.
 fn draw_token<D>(target: &mut D, cx: i32, cy: i32, scale: i32, hh: u8, mm: u8, colon_on: bool)
 where
+    D: DrawTarget<Color = BinaryColor>,
+{
+    draw_token_inner(target, cx, cy, scale, hh, mm, colon_on, false);
+}
+
+fn draw_token_inner<D>(
+    target: &mut D,
+    cx: i32,
+    cy: i32,
+    scale: i32,
+    hh: u8,
+    mm: u8,
+    colon_on: bool,
+    force_dither: bool,
+) where
     D: DrawTarget<Color = BinaryColor>,
 {
     if scale < 8 {
@@ -285,7 +405,7 @@ where
         return;
     }
 
-    let dither = scale < SOLID_SCALE;
+    let dither = force_dither || scale < SOLID_SCALE;
     let cell = |x: i32, w: i32| Cell {
         x,
         y: y0,
@@ -313,7 +433,6 @@ pub struct Clock {
     /// Small frame countdown used to pulse the foreground time when the minute changes.
     pulse: u8,
     colon_on: bool,
-    blink: bool,
     frame: u32,
 }
 
@@ -324,7 +443,6 @@ impl Clock {
             current_min: 0,
             pulse: 0,
             colon_on: true,
-            blink: false,
             frame: 0,
         }
     }
@@ -332,10 +450,6 @@ impl Clock {
     /// Adopt a fresh wall-clock anchor from the network.
     pub fn sync(&mut self, ts: TimeSync) {
         self.anchor = Some(ts);
-    }
-
-    pub fn blink(&self) -> bool {
-        self.blink
     }
 
     fn now_secs(&self) -> u32 {
@@ -349,7 +463,7 @@ impl Clock {
         }
     }
 
-    /// Advance one frame: update the colon blink, the eye blink, and the ring phase.
+    /// Advance one frame: update the colon blink, minute pulse, and ring phase.
     pub fn tick(&mut self) {
         let secs = self.now_secs();
         let cur_min = ((secs / 60) % 1440) as i32;
@@ -363,7 +477,6 @@ impl Clock {
         }
 
         self.frame = self.frame.wrapping_add(1);
-        self.blink = self.frame % BLINK_PERIOD < BLINK_LEN;
     }
 
     /// Draw one readable foreground time with a rotating horizontal ring.
@@ -377,7 +490,8 @@ impl Clock {
         let scale = if self.pulse > 0 { 268 } else { 256 };
 
         draw_ring_back(target, phase);
-        draw_token(target, 80, 46, scale, hh, mm, self.colon_on);
+        draw_token_inner(target, 82, 47, scale, hh, mm, self.colon_on, true);
+        draw_token(target, 79, 44, scale, hh, mm, self.colon_on);
         draw_ring_front(target, phase);
     }
 }
@@ -388,115 +502,17 @@ impl Default for Clock {
     }
 }
 
-/// Draw the bottom-left mascot. Its expression is the weather "sprite variant"; `blink` closes the
-/// eyes for the blink frame.
-fn draw_mascot<D>(target: &mut D, weather: WeatherState, blink: bool)
-where
-    D: DrawTarget<Color = BinaryColor>,
-{
-    let on = BinaryColor::On;
-    let stroke = PrimitiveStyle::with_stroke(on, 1);
-    let fill_style = PrimitiveStyle::with_fill(on);
-    const X: i32 = 4;
-    const Y: i32 = 41;
-
-    // Glowing outline head (hologram look: bright lines on true black).
-    let _ = RoundedRectangle::with_equal_corners(
-        Rectangle::new(Point::new(X, Y + 5), Size::new(22, 18)),
-        Size::new(5, 5),
-    )
-    .into_styled(stroke)
-    .draw(target);
-
-    // Antenna.
-    let _ = Line::new(Point::new(X + 11, Y + 5), Point::new(X + 11, Y + 1))
-        .into_styled(stroke)
-        .draw(target);
-    let _ = Circle::with_center(Point::new(X + 11, Y), 3)
-        .into_styled(fill_style)
-        .draw(target);
-
-    // Eyes (open circles, or closed lines on the blink frame).
-    let eye_y = Y + 13;
-    for eye_x in [X + 7, X + 15] {
-        if blink {
-            let _ = Line::new(Point::new(eye_x - 1, eye_y), Point::new(eye_x + 1, eye_y))
-                .into_styled(stroke)
-                .draw(target);
-        } else {
-            let _ = Circle::with_center(Point::new(eye_x, eye_y), 3)
-                .into_styled(fill_style)
-                .draw(target);
-        }
-    }
-
-    draw_mouth(target, weather, X, Y);
-}
-
-fn draw_mouth<D>(target: &mut D, weather: WeatherState, x: i32, y: i32)
-where
-    D: DrawTarget<Color = BinaryColor>,
-{
-    let stroke = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
-    match weather {
-        WeatherState::Clear => {
-            // Smile.
-            let pts = [
-                Point::new(x + 7, y + 17),
-                Point::new(x + 10, y + 19),
-                Point::new(x + 12, y + 19),
-                Point::new(x + 15, y + 17),
-            ];
-            let _ = Polyline::new(&pts).into_styled(stroke).draw(target);
-        }
-        WeatherState::Clouds => {
-            let _ = Line::new(Point::new(x + 7, y + 18), Point::new(x + 15, y + 18))
-                .into_styled(stroke)
-                .draw(target);
-        }
-        WeatherState::Rain => {
-            // Frown.
-            let pts = [
-                Point::new(x + 7, y + 19),
-                Point::new(x + 10, y + 17),
-                Point::new(x + 12, y + 17),
-                Point::new(x + 15, y + 19),
-            ];
-            let _ = Polyline::new(&pts).into_styled(stroke).draw(target);
-        }
-        WeatherState::Thunderstorm => {
-            // Surprised "o".
-            let _ = Circle::with_center(Point::new(x + 11, y + 18), 3)
-                .into_styled(stroke)
-                .draw(target);
-        }
-        WeatherState::Mist => {
-            // Sleepy wavy mouth.
-            let pts = [
-                Point::new(x + 7, y + 18),
-                Point::new(x + 9, y + 17),
-                Point::new(x + 11, y + 18),
-                Point::new(x + 13, y + 17),
-                Point::new(x + 15, y + 18),
-            ];
-            let _ = Polyline::new(&pts).into_styled(stroke).draw(target);
-        }
-    }
-}
-
-/// The full animated scene: clock + weather particles + mascot. Owns all per-frame state so the
+/// The full animated scene: weather strip + floating clock. Owns all per-frame state so the
 /// render loop stays a thin driver.
 pub struct Scene {
     clock: Clock,
-    particles: ParticleField,
     weather: WeatherState,
 }
 
 impl Scene {
-    pub fn new(seed: u32) -> Self {
+    pub fn new(_seed: u32) -> Self {
         Scene {
             clock: Clock::new(),
-            particles: ParticleField::new(seed),
             weather: WeatherState::Clear,
         }
     }
@@ -510,19 +526,17 @@ impl Scene {
     /// Advance the simulation by one frame (no drawing).
     pub fn tick(&mut self) {
         self.clock.tick();
-        self.particles.step(self.weather);
     }
 
     /// Render the current frame into `target`'s back buffer. Drawing order gives the depth
-    /// illusion: weather is behind, then the ring clock, then the mascot in front.
+    /// illusion: weather context stays in the top strip, then the ring clock fills the stage.
     pub fn draw<D>(&self, target: &mut D)
     where
         D: DrawTarget<Color = BinaryColor>,
     {
         let _ = target.clear(BinaryColor::Off);
         let mut cube_view = CubeView::new(target);
-        self.particles.draw(&mut cube_view, self.weather);
+        draw_weather_strip(&mut cube_view, self.weather);
         self.clock.draw(&mut cube_view);
-        draw_mascot(&mut cube_view, self.weather, self.clock.blink());
     }
 }
