@@ -78,6 +78,12 @@ async fn main(spawner: Spawner) -> ! {
     esp_rtos::start(timg0.timer0, sw_interrupt.software_interrupt0);
     info!("Embassy initialized!");
 
+    // --- True RNG: enables the entropy source WiFi needs and seeds the stack + particles ---
+    let _trng = TrngSource::new(peripherals.RNG, peripherals.ADC1);
+    let rng = Rng::new();
+    let net_seed = ((rng.random() as u64) << 32) | rng.random() as u64;
+    let particle_seed = rng.random();
+
     // --- OLED over async I2C @ 400kHz (fast mode keeps full-frame flushes short) ---
     let i2c = I2c::new(
         peripherals.I2C0,
@@ -91,16 +97,21 @@ async fn main(spawner: Spawner) -> ! {
     let interface = I2CInterface::new(i2c, OLED_ADDR, 0x40);
     let mut display = Ssd1306Async::new(interface, DisplaySize128x64, DisplayRotation::Rotate0)
         .into_buffered_graphics_mode();
-    display.init().await.expect("Failed to initialize OLED");
-    // Hand the 1KB framebuffer to a static so the render task future stays small.
-    static DISPLAY: static_cell::StaticCell<Display> = static_cell::StaticCell::new();
-    let display = DISPLAY.init(display);
-
-    // --- True RNG: enables the entropy source WiFi needs and seeds the stack + particles ---
-    let _trng = TrngSource::new(peripherals.RNG, peripherals.ADC1);
-    let rng = Rng::new();
-    let net_seed = ((rng.random() as u64) << 32) | rng.random() as u64;
-    let particle_seed = rng.random();
+    match display.init().await {
+        Ok(()) => {
+            // Hand the 1KB framebuffer to a static so the render task future stays small.
+            static DISPLAY: static_cell::StaticCell<Display> = static_cell::StaticCell::new();
+            let display = DISPLAY.init(display);
+            spawner.spawn(render_loop(display, particle_seed).unwrap());
+        }
+        Err(e) => {
+            warn!(
+                "OLED init failed at I2C address 0x{:02X} on SCL=GPIO9/SDA=GPIO8: {:?}. \
+                 Check wiring, power, pull-ups, and whether the panel address is 0x3C or 0x3D.",
+                OLED_ADDR, e
+            );
+        }
+    }
 
     // --- WiFi + embassy-net stack (DHCP) ---
     let (controller, interfaces) =
@@ -128,7 +139,6 @@ async fn main(spawner: Spawner) -> ! {
 
     spawner.spawn(net_task(runner).unwrap());
     spawner.spawn(wifi_weather_fetcher(controller, stack, scratch).unwrap());
-    spawner.spawn(render_loop(display, particle_seed).unwrap());
 
     info!("esp-hologram started");
     // Keep `_trng` alive for the whole program lifetime so the entropy source stays enabled.
