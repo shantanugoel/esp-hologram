@@ -22,6 +22,9 @@ use embedded_graphics::{
 use crate::weather::{ParticleField, WeatherState};
 use crate::{TimeSync, Update};
 
+const DISPLAY_W: i32 = 128;
+const DISPLAY_H: i32 = 64;
+
 // Base (full-scale) digit metrics in pixels; everything else scales off these.
 const DW: i32 = 11; // digit width
 const DH: i32 = 18; // digit height
@@ -80,6 +83,48 @@ const SEG: [u8; 10] = [
     0b1111111, // 8
     0b1101111, // 9
 ];
+
+/// Draw into the OLED buffer vertically flipped so the cube reflection reads normally.
+struct CubeView<'a, D> {
+    target: &'a mut D,
+}
+
+impl<'a, D> CubeView<'a, D> {
+    fn new(target: &'a mut D) -> Self {
+        Self { target }
+    }
+}
+
+impl<D> DrawTarget for CubeView<'_, D>
+where
+    D: DrawTarget<Color = BinaryColor>,
+{
+    type Color = BinaryColor;
+    type Error = D::Error;
+
+    fn draw_iter<I>(&mut self, pixels: I) -> Result<(), Self::Error>
+    where
+        I: IntoIterator<Item = Pixel<Self::Color>>,
+    {
+        self.target
+            .draw_iter(pixels.into_iter().filter_map(|Pixel(p, color)| {
+                if (0..DISPLAY_W).contains(&p.x) && (0..DISPLAY_H).contains(&p.y) {
+                    Some(Pixel(Point::new(p.x, DISPLAY_H - 1 - p.y), color))
+                } else {
+                    None
+                }
+            }))
+    }
+}
+
+impl<D> OriginDimensions for CubeView<'_, D>
+where
+    D: DrawTarget<Color = BinaryColor>,
+{
+    fn size(&self) -> Size {
+        Size::new(DISPLAY_W as u32, DISPLAY_H as u32)
+    }
+}
 
 /// Fill a rectangle, optionally through a checkerboard mask (the "depth" dither).
 fn fill<D>(target: &mut D, x: i32, y: i32, w: i32, h: i32, dither: bool)
@@ -469,14 +514,15 @@ impl Scene {
     }
 
     /// Render the current frame into `target`'s back buffer. Drawing order gives the depth
-    /// illusion: weather is behind, then the carousel, then the mascot in front.
+    /// illusion: weather is behind, then the ring clock, then the mascot in front.
     pub fn draw<D>(&self, target: &mut D)
     where
         D: DrawTarget<Color = BinaryColor>,
     {
         let _ = target.clear(BinaryColor::Off);
-        self.particles.draw(target, self.weather);
-        self.clock.draw(target);
-        draw_mascot(target, self.weather, self.clock.blink());
+        let mut cube_view = CubeView::new(target);
+        self.particles.draw(&mut cube_view, self.weather);
+        self.clock.draw(&mut cube_view);
+        draw_mascot(&mut cube_view, self.weather, self.clock.blink());
     }
 }
