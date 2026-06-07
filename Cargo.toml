@@ -9,7 +9,10 @@ name = "esp-hologram"
 path = "./src/bin/main.rs"
 
 [dependencies]
-esp-hal = { version = "~1.1.0", features = ["esp32c3", "log-04", "unstable"] }
+esp-hal = { version = "~1.1.1", features = ["esp32c3", "log-04", "unstable"] }
+display-interface-i2c = "0.5.0"
+embedded-graphics = "0.8.2"
+ssd1306 = "0.10.0"
 
 esp-rtos = { version = "0.3.0", features = [
   "embassy",
@@ -20,7 +23,7 @@ esp-rtos = { version = "0.3.0", features = [
 ] }
 
 esp-bootloader-esp-idf = { version = "0.5.0", features = ["esp32c3", "log-04"] }
-log                    = "0.4.27"
+log                    = "0.4.32"
 
 embassy-net = { version = "0.9.1", features = [
   "dhcpv4",
@@ -40,7 +43,7 @@ esp-backtrace = { version = "0.19.0", features = [
 esp-println = { version = "0.17.0", features = ["esp32c3", "log-04"] }
 # for more networking protocol support see https://crates.io/crates/edge-net
 embassy-executor = { version = "0.10.0", features = ["log"] }
-embassy-time = { version = "0.5.0", features = ["log"] }
+embassy-time = { version = "0.5.1", features = ["log"] }
 esp-radio = { version = "0.18.0", features = [
   "esp-alloc",
   "esp32c3",
@@ -48,7 +51,7 @@ esp-radio = { version = "0.18.0", features = [
   "unstable",
   "wifi",
 ] }
-smoltcp = { version = "0.13.0", default-features = false, features = [
+smoltcp = { version = "0.13.1", default-features = false, features = [
   "log",
   "medium-ethernet",
   "multicast",

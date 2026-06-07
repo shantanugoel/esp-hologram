@@ -7,12 +7,22 @@
 )]
 #![deny(clippy::large_stack_frames)]
 
+use display_interface_i2c::I2CInterface;
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
+use embedded_graphics::{
+    mono_font::{MonoTextStyle, ascii::FONT_6X10},
+    pixelcolor::BinaryColor,
+    prelude::*,
+    text::Text,
+};
 use esp_backtrace as _;
 use esp_hal::clock::CpuClock;
+use esp_hal::i2c::master::{Config as I2cConfig, I2c};
+use esp_hal::time::Rate;
 use esp_hal::timer::timg::TimerGroup;
 use log::info;
+use ssd1306::{Ssd1306, prelude::*};
 
 extern crate alloc;
 
@@ -25,7 +35,7 @@ esp_bootloader_esp_idf::esp_app_desc!();
     reason = "it's not unusual to allocate larger buffers etc. in main"
 )]
 #[esp_rtos::main]
-async fn main(spawner: Spawner) -> ! {
+async fn main(_spawner: Spawner) -> ! {
     // generator version: 1.3.0
     // generator parameters: --chip esp32c3 -o esp32c3-mini-1 -o unstable-hal -o alloc -o wifi -o embassy -o log -o esp-backtrace -o wokwi -o ci -o vscode -o stable-x86_64-unknown-linux-gnu
 
@@ -57,15 +67,41 @@ async fn main(spawner: Spawner) -> ! {
 
     info!("Embassy initialized!");
 
-    let (mut _wifi_controller, _interfaces) =
-        esp_radio::wifi::new(peripherals.WIFI, Default::default())
-            .expect("Failed to initialize Wi-Fi controller");
+    let mut i2c = I2c::new(
+        peripherals.I2C0,
+        I2cConfig::default().with_frequency(Rate::from_khz(100)),
+    )
+    .expect("Failed to initialize I2C")
+    .with_scl(peripherals.GPIO9)
+    .with_sda(peripherals.GPIO8);
 
-    // TODO: Spawn some tasks
-    let _ = spawner;
+    let mut oled_addr = None;
+    for candidate in [0x3C_u8, 0x3D_u8] {
+        if i2c.write(candidate, &[0x00]).is_ok() {
+            oled_addr = Some(candidate);
+            break;
+        }
+    }
+    let oled_addr = oled_addr.expect("OLED not found at I2C address 0x3C/0x3D");
+    info!("OLED found at I2C address 0x{:02X}", oled_addr);
+
+    let interface = I2CInterface::new(i2c, oled_addr, 0x40);
+    let mut display = Ssd1306::new(interface, DisplaySize128x64, DisplayRotation::Rotate0)
+        .into_buffered_graphics_mode();
+
+    display.init().expect("Failed to initialize OLED");
+    display
+        .clear(BinaryColor::Off)
+        .expect("Failed to clear OLED");
+
+    let style = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
+    Text::new("Hello world!", Point::new(0, 16), style)
+        .draw(&mut display)
+        .expect("Failed to draw text");
+    display.flush().expect("Failed to flush OLED buffer");
 
     loop {
-        info!("Hello world!");
+        info!("OLED says hello!");
         Timer::after(Duration::from_secs(1)).await;
     }
 

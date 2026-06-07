@@ -35,8 +35,8 @@
         ],
         [ "oled1:VCC", "esp:3V3.1", "red", [ "v-28.8", "h-86.25", "v172.8" ] ],
     [ "esp:GND.1", "oled1:GND", "black", [ "v-0.3", "h-42.18", "v-153.6", "h67.2" ] ],
-    [ "oled1:SCL", "esp:8", "green", [ "v-28.8", "h77.1", "v0", "h0", "v211.2" ] ],
-    [ "oled1:SDA", "esp:9", "green", [ "v-19.2", "h57.67", "v192" ] ]
+    [ "oled1:SCL", "esp:9", "green", [ "v-28.8", "h77.1", "v0", "h0", "v211.2" ] ],
+    [ "oled1:SDA", "esp:8", "green", [ "v-19.2", "h57.67", "v192" ] ]
     ],
     "serialMonitor": {
         "display": "terminal",
